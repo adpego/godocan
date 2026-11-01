@@ -1,0 +1,201 @@
+package roe_test
+
+import (
+	"bytes"
+	"testing"
+	"time"
+
+	"github.com/adpego/godocan/internal/config"
+	"github.com/adpego/godocan/internal/uds"
+	"github.com/adpego/godocan/internal/uds/services/did"
+	"github.com/adpego/godocan/internal/uds/services/dtc"
+	"github.com/adpego/godocan/internal/uds/services/roe"
+	"github.com/adpego/godocan/internal/uds/udstest"
+)
+
+type env struct {
+	e    *uds.ECU
+	dtcs *dtc.Store
+	c    *udstest.Client
+}
+
+func newEnv(t *testing.T, cfg *config.ROEService) env {
+	t.Helper()
+	e := uds.New() // real clock: event detection uses real timers
+	dids, err := did.NewStore(e, []config.DID{{ID: 0x0100, Data: config.Data{Hex: "00"}, Write: &config.Access{}}})
+	udstest.Must(t, err)
+	dtcs, err := dtc.NewStore(e, []config.DTC{{Code: 0x010000, Status: 0x00}})
+	udstest.Must(t, err)
+	if cfg == nil {
+		cfg = &config.ROEService{PollMs: 10, FastMs: 30}
+	}
+	udstest.Must(t, roe.Register(e, cfg, roe.Deps{DIDs: dids, DTCs: dtcs}))
+	udstest.Must(t, did.RegisterRead(e, &config.ReadDIDService{}, dids))
+	udstest.Must(t, did.RegisterWrite(e, &config.Service{}, dids))
+	udstest.Must(t, dtc.RegisterRead(e, &config.ReadDTCService{}, dtcs))
+	return env{e: e, dtcs: dtcs, c: udstest.NewClient()}
+}
+
+func (v env) send(t *testing.T, req, want []byte) {
+	t.Helper()
+	udstest.SendFrom(t, v.e, v.c, req, want)
+}
+
+func (v env) expect(t *testing.T, want []byte) {
+	t.Helper()
+	if got := v.c.Next(time.Second); !bytes.Equal(got, want) {
+		t.Fatalf("event response: got % X, want % X", got, want)
+	}
+}
+
+func (v env) expectNone(t *testing.T) {
+	t.Helper()
+	if got := v.c.Next(150 * time.Millisecond); got != nil {
+		t.Fatalf("unexpected event response % X", got)
+	}
+}
+
+func TestOnChangeOfDataIdentifier(t *testing.T) {
+	v := newEnv(t, nil)
+	v.send(t, []byte{0x86, 0x03, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00}, []byte{0xC6, 0x03, 0x00, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.expectNone(t)
+
+	v.send(t, []byte{0x2E, 0x01, 0x00, 0x42}, []byte{0x6E, 0x01, 0x00})
+	v.expect(t, []byte{0x62, 0x01, 0x00, 0x42})
+	v.expectNone(t)
+
+	v.send(t, []byte{0x86, 0x04}, []byte{0xC6, 0x04, 0x01, 0x03, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x00, 0x02}, []byte{0xC6, 0x00, 0x01, 0x02})
+	v.send(t, []byte{0x2E, 0x01, 0x00, 0x43}, []byte{0x6E, 0x01, 0x00})
+	v.expectNone(t)
+	v.send(t, []byte{0x86, 0x04}, []byte{0xC6, 0x04, 0x00})
+
+	// Restart keeps the events; clear removes them.
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.send(t, []byte{0x86, 0x06, 0x02}, []byte{0xC6, 0x06, 0x00, 0x02})
+	v.send(t, []byte{0x86, 0x05, 0x02}, udstest.NRC(0x86, uds.NRCRequestSequenceError))
+}
+
+// The number of identified events belongs to the events: it is reported
+// until they are cleared, and a new setup starts again from 0.
+func TestIdentifiedEventsResetWhenCleared(t *testing.T) {
+	v := newEnv(t, nil)
+	setup := []byte{0x86, 0x03, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00}
+	v.send(t, setup, []byte{0xC6, 0x03, 0x00, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.send(t, []byte{0x2E, 0x01, 0x00, 0x42}, []byte{0x6E, 0x01, 0x00})
+	v.expect(t, []byte{0x62, 0x01, 0x00, 0x42})
+	v.send(t, []byte{0x86, 0x06, 0x02}, []byte{0xC6, 0x06, 0x01, 0x02})
+	v.send(t, setup, []byte{0xC6, 0x03, 0x00, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.send(t, []byte{0x2E, 0x01, 0x00, 0x43}, []byte{0x6E, 0x01, 0x00})
+	v.expect(t, []byte{0x62, 0x01, 0x00, 0x43})
+	udstest.SetSession(v.e, uds.SessionExtended)
+	udstest.SetSession(v.e, uds.SessionDefault)
+	v.send(t, setup, []byte{0xC6, 0x03, 0x00, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+}
+
+func TestOnDTCStatusChange(t *testing.T) {
+	v := newEnv(t, nil)
+	// Respond with reportMostRecentTestFailedDTC on testFailed changes.
+	v.send(t, []byte{0x86, 0x01, 0x02, 0x01, 0x19, 0x0D}, []byte{0xC6, 0x01, 0x00, 0x02, 0x01, 0x19, 0x0D})
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+
+	// Bits outside the mask do not trigger.
+	v.e.Do(func(*uds.Context) { v.dtcs.SetStatus(0x010000, 0x08) })
+	v.expectNone(t)
+	v.e.Do(func(*uds.Context) { v.dtcs.SetStatus(0x010000, 0x09) })
+	v.expect(t, []byte{0x59, 0x0D, 0xFF, 0x01, 0x00, 0x00, 0x09})
+}
+
+func TestOnTimerInterrupt(t *testing.T) {
+	v := newEnv(t, nil)
+	v.send(t, []byte{0x86, 0x02, 0x02, 0x03, 0x22, 0x01, 0x00}, []byte{0xC6, 0x02, 0x00, 0x02, 0x03, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	for i := 0; i < 3; i++ {
+		v.expect(t, []byte{0x62, 0x01, 0x00, 0x00})
+	}
+}
+
+func TestEventWindowAndDefaultSession(t *testing.T) {
+	v := newEnv(t, nil)
+	v.send(t, []byte{0x86, 0x02, 0x01, 0x03, 0x22, 0x01, 0x00}, []byte{0xC6, 0x02, 0x00, 0x01, 0x03, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x05, 0x01}, []byte{0xC6, 0x05, 0x00, 0x01})
+	v.expect(t, []byte{0x62, 0x01, 0x00, 0x00})
+	time.Sleep(time.Second) // 1 s window
+	for v.c.Next(10*time.Millisecond) != nil {
+	}
+	v.expectNone(t)
+
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.expect(t, []byte{0x62, 0x01, 0x00, 0x00})
+	udstest.SetSession(v.e, uds.SessionExtended)
+	udstest.SetSession(v.e, uds.SessionDefault)
+	for v.c.Next(10*time.Millisecond) != nil {
+	}
+	v.expectNone(t)
+	v.send(t, []byte{0x86, 0x05, 0x02}, udstest.NRC(0x86, uds.NRCRequestSequenceError))
+}
+
+func TestClientDisconnectStopsEvents(t *testing.T) {
+	v := newEnv(t, nil)
+	v.send(t, []byte{0x86, 0x02, 0x02, 0x03, 0x22, 0x01, 0x00}, []byte{0xC6, 0x02, 0x00, 0x02, 0x03, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.c.Disconnect()
+	time.Sleep(50 * time.Millisecond)
+	v.send(t, []byte{0x86, 0x04}, []byte{0xC6, 0x04, 0x00})
+}
+
+func TestErrors(t *testing.T) {
+	v := newEnv(t, &config.ROEService{MaxEvents: 1, AllowedServices: []uint8{0x22}})
+	cases := []struct {
+		name string
+		req  []byte
+		nrc  byte
+	}{
+		{"bad timer rate", []byte{0x86, 0x02, 0x02, 0x09, 0x22, 0x01, 0x00}, uds.NRCRequestOutOfRange},
+		{"unknown DID", []byte{0x86, 0x03, 0x02, 0x12, 0x34, 0x22, 0x01, 0x00}, uds.NRCRequestOutOfRange},
+		{"service not allowed", []byte{0x86, 0x03, 0x02, 0x01, 0x00, 0x19, 0x0A}, uds.NRCRequestOutOfRange},
+		{"no service", []byte{0x86, 0x03, 0x02, 0x01, 0x00}, uds.NRCInvalidMessageLengthOrFormat},
+		{"start length", []byte{0x86, 0x05}, uds.NRCInvalidMessageLengthOrFormat},
+		{"report length", []byte{0x86, 0x04, 0x02, 0x00}, uds.NRCInvalidMessageLengthOrFormat},
+		{"bad event type", []byte{0x86, 0x07, 0x02}, uds.NRCSubFunctionNotSupported},
+	}
+	for _, c := range cases {
+		got := v.e.Process(v.c, c.req, false)
+		if len(got) != 1 || !bytes.Equal(got[0].Data, udstest.NRC(0x86, c.nrc)) {
+			t.Errorf("%s: got %+v, want NRC 0x%02X", c.name, got, c.nrc)
+		}
+	}
+	// storeEvent bit is accepted.
+	v.send(t, []byte{0x86, 0x43, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00}, []byte{0xC6, 0x43, 0x00, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x03, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00}, udstest.NRC(0x86, uds.NRCRequestOutOfRange)) // max events
+	// Start needs a client to send events to.
+	udstest.Send(t, v.e, []byte{0x86, 0x05, 0x02}, udstest.NRC(0x86, uds.NRCConditionsNotCorrect))
+	// No new events while active.
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.send(t, []byte{0x86, 0x06, 0x02}, []byte{0xC6, 0x06, 0x00, 0x02})
+}
+
+func TestSetupWhileActive(t *testing.T) {
+	v := newEnv(t, nil)
+	v.send(t, []byte{0x86, 0x03, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00}, []byte{0xC6, 0x03, 0x00, 0x02, 0x01, 0x00, 0x22, 0x01, 0x00})
+	v.send(t, []byte{0x86, 0x05, 0x02}, []byte{0xC6, 0x05, 0x00, 0x02})
+	v.send(t, []byte{0x86, 0x02, 0x02, 0x03, 0x22, 0x01, 0x00}, udstest.NRC(0x86, uds.NRCConditionsNotCorrect))
+	v.send(t, []byte{0x86, 0x06, 0x02}, []byte{0xC6, 0x06, 0x00, 0x02})
+}
+
+func TestNoDTCStore(t *testing.T) {
+	e := uds.New()
+	udstest.Must(t, roe.Register(e, &config.ROEService{}, roe.Deps{}))
+	udstest.Send(t, e, []byte{0x86, 0x01, 0x02, 0x01, 0x19, 0x0D}, udstest.NRC(0x86, uds.NRCRequestOutOfRange))
+}
+
+func TestInvalidConfig(t *testing.T) {
+	e := uds.New()
+	if err := roe.Register(e, &config.ROEService{EventTypes: []config.SubFunction{{ID: 0x08}}}, roe.Deps{}); err == nil {
+		t.Error("expected error")
+	}
+}

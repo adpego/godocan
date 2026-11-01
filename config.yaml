@@ -1,0 +1,397 @@
+# CAN side: SocketCAN interface, identifiers and ISO 15765-2 (ISO-TP).
+can:
+  interface: vcan0              # SocketCAN interface (defaults to can0)
+  request_id: 0x7E0             # physical requests, tester -> ECU
+  response_id: 0x7E8            # responses and unsolicited messages, ECU -> tester
+  functional_id: 0x7DF          # functional requests (single frames only)
+  extended_ids: false           # true: 29-bit identifiers (e.g. 0x18DA10F1 / 0x18DAF110)
+
+  # addressing: extended        # normal (default) | extended: first byte = address
+  # rx_address: 0x10            # address byte of physical requests
+  # tx_address: 0xF1            # address byte of sent frames
+  # functional_address: 0xFE    # address byte of functional requests (default rx_address)
+
+  fd: false                     # send CAN FD frames (FD frames are always accepted)
+  # bitrate_switch: true        # BRS flag on sent FD frames
+  # tx_dl: 64                   # bytes per frame: 8, FD 8..64 (default 8 / 64)
+  padding: 0xCC                 # pad frames to 8 bytes (omit: minimal frames)
+
+  block_size: 0                 # BS of our flow control (0 = whole message at once)
+  st_min: 0                     # STmin of our flow control (0-127 ms, 0xF1-0xF9 = 100-900 us)
+  max_message_size: 4095        # largest request accepted (flow control overflow above)
+  n_bs_ms: 1000                 # wait for the tester's flow control
+  n_cr_ms: 1000                 # wait for the next consecutive frame
+  wft_max: 10                   # flow control WAIT frames accepted in a row
+
+  # periodic_response_id: 0x6E8 # periodic data (0x2A) as single frames on this ID
+
+# Every element (service, session, DID...) can have an `access` block:
+#   access:
+#     sessions: [0x03]          # allowed active sessions (empty = any)
+#     security_levels: [0x01]   # one of these levels must be unlocked (empty = none)
+#     nrc: 0x22                 # always answer with this NRC
+ecu:
+  name: "Engine ECU"
+  s3_timeout_ms: 5000
+
+  # A service missing from this list is not supported (NRC 0x11).
+  # Use `{}` to enable a service with its default settings.
+  # Every service accepts `access` and `response_pending`:
+  #   response_pending:
+  #     count: 2           # NRC 0x78 messages before the final response
+  #     interval_ms: 1000  # time between them (keep it below P2*)
+  services:
+    diagnostic_session_control:
+      sessions:
+        - id: 0x01
+          name: default
+        - id: 0x02
+          name: programming
+          p2_ms: 25
+          p2_star_ms: 5000
+          access:
+            sessions: [0x03]    # programming can only be entered from extended
+        - id: 0x03
+          name: extended
+
+    tester_present: {}
+
+    # Authentication (ISO 14229-1:2020). APCE is enabled by ca_certificates,
+    # ACR (HMAC-SHA256 over the server challenge) by secret. Being
+    # authenticated unlocks `security_level` for every access block.
+    authentication:
+      security_level: 0x7F
+      challenge_length: 32
+      secret: "00 11 22 33 44 55 66 77"   # ACR
+      # APCE (see tests/e2e/pki for a test PKI):
+      # ca_certificates: [pki/ca.pem]
+      # server_certificate: pki/ecu.pem   # optional, bidirectional APCE
+      # server_key: pki/ecu.key
+
+    # Simplified SecuredDataTransmission: HMAC-SHA256 signatures, no
+    # encryption, anti-replay counter. The internal request goes through the
+    # normal service checks.
+    secured_data_transmission:
+      secret: "C0 FF EE"
+      require_signature: false
+      anti_replay: true
+
+    ecu_reset:
+      reset_types:
+        - id: 0x01          # hardReset
+        - id: 0x03          # softReset
+        - id: 0x02          # keyOffOnReset
+          access:
+            sessions: [0x02, 0x03]
+        - id: 0x04          # enableRapidPowerShutDown
+          power_down_time: 10
+
+    security_access:
+      levels:
+        - level: 0x01             # requestSeed = 0x01, sendKey = 0x02
+          name: extended
+          access:
+            sessions: [0x03]
+          seed: "11 22 33 44"     # fixed seed; omit for a random seed of seed_length bytes
+          algorithm: xor          # xor | add | not | fixed | seed
+          secret: "AA BB CC DD"   # key = seed XOR secret = BB 99 FF 99
+          max_attempts: 3
+          lockout_ms: 10000
+        - level: 0x11
+          name: programming
+          access:
+            sessions: [0x02]
+          seed_length: 4
+          algorithm: add
+          secret: "12 34 56 78"
+
+    read_data_by_identifier:
+      max_dids_per_request: 8
+
+    write_data_by_identifier:
+      access:
+        sessions: [0x02, 0x03]
+
+    read_memory_by_address:
+      max_read_size: 1024
+
+    write_memory_by_address:
+      access:
+        sessions: [0x02, 0x03]
+
+    routine_control:
+      response_pending:
+        count: 1
+        interval_ms: 500
+
+    read_dtc_information:
+      status_availability_mask: 0xFF
+      # report_types:              # empty = every implemented report type
+      #   - id: 0x02
+      #   - id: 0x04
+      #     access:
+      #       sessions: [0x03]
+
+    clear_diagnostic_information:
+      status_after_clear: 0x50     # testNotCompleted bits set (ISO default)
+      groups:
+        - id: 0x000001
+          name: powertrain
+          codes: [0x010100, 0x030000]
+
+    control_dtc_setting:
+      access:
+        sessions: [0x03]
+
+    input_output_control_by_identifier:
+      access:
+        sessions: [0x03]
+
+    communication_control:
+      access:
+        sessions: [0x02, 0x03]
+      # control_types:            # empty = 0x00-0x03
+      #   - id: 0x03
+      #     access: {security_levels: [0x01]}
+      communication_types: [0x01, 0x02, 0x03]
+
+    link_control:
+      access:
+        sessions: [0x02, 0x03]
+      modes: [0x10, 0x11, 0x12, 0x13]   # CAN 125k/250k/500k/1M
+      max_baudrate: 1000000
+
+    # Data transfer on ecu.memory. Region read/write access applies.
+    # Downloads are applied and persisted to memory.output_file on
+    # RequestTransferExit; aborted transfers leave the memory untouched.
+    request_download:
+      access:
+        sessions: [0x02]
+      max_block_length: 0x0402   # SID + counter + 1024 data bytes (ISO-TP segments it)
+      data_formats: [0x00]       # 0x00 = no compression/encryption
+    request_upload:
+      access:
+        sessions: [0x02, 0x03]
+    # Files under `root` (relative to this file) are exposed to
+    # RequestFileTransfer; paths can never escape it.
+    request_file_transfer:
+      access:
+        sessions: [0x02, 0x03]
+      root: firmware/files
+      modes: [0x01, 0x02, 0x03, 0x04, 0x05]   # add, delete, replace, read, read dir
+      max_file_size: 1048576
+    transfer_data: {}
+    request_transfer_exit: {}
+
+    read_scaling_data_by_identifier: {}
+
+    # Dynamic DIDs, readable with ReadDataByIdentifier and cleared when the
+    # default session is entered.
+    dynamically_define_data_identifier:
+      access:
+        sessions: [0x03]
+      # identifiers: [0xF200, 0xF201]   # empty = 0xF200-0xF3FF
+      max_sources: 16
+
+    # Periodic identifier 0xNN reads DID 0xF2NN (static or dynamic).
+    read_data_by_periodic_identifier:
+      access:
+        sessions: [0x03]
+      slow_ms: 1000
+      medium_ms: 300
+      fast_ms: 100
+      max_periodic_dids: 8
+      message_type: 1          # 1: 6A pDID data, 2: pDID data
+
+    # Events: onDTCStatusChange (0x01), onTimerInterrupt (0x02),
+    # onChangeOfDataIdentifier (0x03). eventWindowTime 0x02 = infinite,
+    # other values are seconds.
+    response_on_event:
+      access:
+        sessions: [0x03]
+      max_events: 4
+      poll_ms: 50
+      slow_ms: 1000              # timer rates
+      medium_ms: 300
+      fast_ms: 100
+      allowed_services: [0x19, 0x22, 0x31]
+
+  # Data identifiers shared by ReadDataByIdentifier and WriteDataByIdentifier:
+  # a successful write changes the value returned by later reads.
+  #   ascii / hex      initial value
+  #   length           fixed size (writes must match); 0 = size of the value
+  #   variable_length  accept writes of any length
+  #   volatile         restore the initial value on ECU reset
+  #   read             access to read (omitted = always readable)
+  #   write            access to write (omitted = not writable)
+  #   io_control       controllable with InputOutputControlByIdentifier (0x2F):
+  #                      parameters (default 0x00-0x03), default (resetToDefault value),
+  #                      enable_mask (shortTermAdjustment carries a mask), access
+  #   scaling          scalingByte + extensions returned by ReadScalingDataByIdentifier (0x24)
+  dids:
+    - id: 0xF190
+      name: VIN
+      ascii: "WBA12345678901234"
+      write:
+        sessions: [0x03]
+        security_levels: [0x01]
+
+    - id: 0xF18C
+      name: ECU serial number
+      ascii: "ECU001"
+
+    - id: 0xF189
+      name: Software version
+      hex: "01 02 03"
+
+    - id: 0xF186
+      name: Active diagnostic session
+      hex: "01"
+      read:
+        sessions: [0x01, 0x03]
+
+    - id: 0x0100
+      name: Calibration value
+      hex: "00 64"
+      scaling: {hex: "12 01 02"}    # unsigned numeric, 2 bytes + formula
+      read:
+        sessions: [0x03]
+      write:
+        sessions: [0x03]
+
+    - id: 0x0101
+      name: Workshop name
+      ascii: "GODCAN"
+      variable_length: true
+      volatile: true
+      write: {}
+
+    - id: 0x0500
+      name: Cooling fan duty cycle (%)
+      hex: "1E"
+      io_control:
+        default: {hex: "00"}
+
+    - id: 0x0501
+      name: Output lines bitfield
+      hex: "00 00"
+      io_control:
+        parameters: [0x00, 0x03]
+        enable_mask: true
+        access:
+          security_levels: [0x01]
+
+    - id: 0x0200
+      name: Secret data
+      length: 8
+      read:
+        security_levels: [0x01]
+
+  # Routines for RoutineControl. Each action (start/stop/results) is optional:
+  #   access            extra access for this action
+  #   option_length     exact length of routineControlOptionRecord
+  #   response          routineStatusRecord (ascii/hex)
+  #   running_response  results only: response while the routine is running
+  #   cases             responses (or NRCs) depending on the option record
+  #   effects           start only: erase_memory / set_did
+  routines:
+    - id: 0x0203
+      name: Check programming preconditions
+      start:
+        response: {hex: "00"}
+      results:
+        response: {hex: "00"}
+
+    - id: 0xFF00
+      name: Erase memory
+      access:
+        sessions: [0x02]
+        security_levels: [0x11]
+      duration_ms: 2000
+      start:
+        option_length: 8          # 4-byte address + 4-byte size
+        response: {hex: "00"}
+        effects:
+          - erase_memory: {start: 0x010000, size: 0x100}
+      results:
+        running_response: {hex: "01"}   # in progress
+        response: {hex: "00"}           # correct
+
+    - id: 0xFF01
+      name: Check memory
+      access:
+        sessions: [0x02]
+      start:
+        response: {hex: "00"}
+        cases:
+          - request: {hex: "DE AD BE EF"}
+            response: {hex: "01"}     # incorrect CRC
+          - request: {hex: "00 00 00 00"}
+            nrc: 0x31
+
+    - id: 0x0300
+      name: Actuator test
+      access:
+        sessions: [0x03]
+      start:
+        effects:
+          - set_did: {id: 0x0101, ascii: "ACTIVE"}
+          - set_dtc: {code: 0x030000, status: 0x09}   # ignored while DTC setting is off
+      stop:
+        response: {hex: "00"}
+      results:
+        running_response: {hex: "01"}
+        response: {hex: "00"}
+
+  # Diagnostic trouble codes, in chronological order (first = oldest).
+  dtcs:
+    - code: 0x010100               # P0101
+      name: Mass air flow circuit range
+      status: 0x2F
+      severity: 0x40               # checkAtNextHalt
+      functional_unit: 0x10
+      fault_detection_counter: 0x7F
+      snapshots:
+        - record: 0x01
+          dids:
+            - {id: 0xF40C, hex: "0B B8"}   # engine speed
+            - {id: 0xF40D, hex: "50"}      # vehicle speed
+      extended_data:
+        - record: 0x01
+          hex: "05"                       # occurrence counter
+    - code: 0x030000               # P0300
+      name: Random misfire detected
+      status: 0x00
+      fault_detection_counter: 0x20
+    - code: 0xC10000               # U0100
+      name: Lost communication with ECM
+      status: 0x08
+      permanent: true
+
+  # ECU memory used by ReadMemoryByAddress / WriteMemoryByAddress.
+  # The input file is never modified: writes go to output_file.
+  # Paths are relative to this configuration file.
+  memory:
+    file: firmware/engine_ecu.s19      # .s19/.s28/.s37/.srec, .hex (Intel HEX) or .bin
+    # format: srec                     # srec | ihex | bin (default: detect)
+    # base_address: 0x0                # load address of .bin files
+    output_file: firmware/engine_ecu.out.s19
+    # output_format: ihex              # default: same as the input file
+    resume_from_output: false          # true: start from output_file if it exists
+    fill: 0xFF                         # value of bytes missing from the file
+    # Without regions, every segment of the file is readable and writable.
+    regions:
+      - name: code
+        start: 0x010000
+        size: 0x10000
+        write:
+          sessions: [0x02]
+          security_levels: [0x11]
+      - name: calibration
+        start: 0x020000
+        size: 0x1000
+        read:
+          sessions: [0x01, 0x03]
+        write:
+          sessions: [0x03]
+          security_levels: [0x01]
