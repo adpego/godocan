@@ -1,0 +1,4 @@
+udsoncan>=1.26
+can-isotp>=2.0
+pytest>=8
+cryptography>=42

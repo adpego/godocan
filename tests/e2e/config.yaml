@@ -1,0 +1,188 @@
+# Configuration used by the end-to-end tests. Keep it in sync with the tests.
+can:
+  interface: vcan0
+  request_id: 0x7E0
+  response_id: 0x7E8
+  functional_id: 0x7DF
+  padding: 0xCC
+
+ecu:
+  name: "E2E ECU"
+  s3_timeout_ms: 4000
+
+  services:
+    diagnostic_session_control:
+      sessions:
+        - id: 0x01
+        - id: 0x02
+          access:
+            sessions: [0x03]
+        - id: 0x03
+          p2_ms: 25
+          p2_star_ms: 2000
+
+    ecu_reset:
+      reset_types:
+        - id: 0x01
+        - id: 0x03
+        - id: 0x04
+          power_down_time: 10
+
+    security_access:
+      levels:
+        - level: 0x01
+          access:
+            sessions: [0x03]
+          seed: "11 22 33 44"
+          algorithm: xor
+          secret: "AA BB CC DD"
+          max_attempts: 2
+          lockout_ms: 1000
+
+    tester_present: {}
+
+    secured_data_transmission:
+      secret: "C0 FF EE"
+
+    # APCE with the test PKI in pki/, ACR with a shared secret.
+    authentication:
+      security_level: 0x7F
+      ca_certificates: [pki/ca.pem]
+      server_certificate: pki/ecu.pem
+      server_key: pki/ecu.key
+      secret: "00 11 22 33 44 55 66 77"
+
+    read_data_by_identifier: {}
+
+    write_data_by_identifier: {}
+
+    read_memory_by_address: {}
+
+    write_memory_by_address: {}
+
+    routine_control: {}
+
+    read_dtc_information: {}
+
+    clear_diagnostic_information: {}
+
+    control_dtc_setting: {}
+
+    input_output_control_by_identifier:
+      access:
+        sessions: [0x03]
+
+    communication_control: {}
+
+    link_control: {}
+
+    request_download:
+      max_block_length: 34
+    request_upload:
+      max_block_length: 34
+    request_file_transfer:
+      root: files
+      max_block_length: 34
+    transfer_data: {}
+    request_transfer_exit: {}
+
+    read_scaling_data_by_identifier:
+      response_pending:
+        count: 2
+        interval_ms: 100
+
+    dynamically_define_data_identifier: {}
+
+    response_on_event:
+      poll_ms: 20
+      fast_ms: 100
+
+    read_data_by_periodic_identifier:
+      fast_ms: 50
+      medium_ms: 100
+      slow_ms: 200
+
+  dids:
+    - id: 0xF190
+      ascii: "WBA12345678901234"
+    - id: 0xF18A
+      ascii: "AUTH-ONLY"
+      read:
+        security_levels: [0x7F]
+    - id: 0xF189
+      hex: "01 02 03"
+      scaling: {hex: "41 02"}
+    - id: 0x0100
+      hex: "00 64"
+      read:
+        sessions: [0x03]
+      write:
+        sessions: [0x03]
+        security_levels: [0x01]
+    - id: 0x0101
+      ascii: "GODCAN"
+      variable_length: true
+      volatile: true
+      write: {}
+    - id: 0x0500
+      hex: "1E"
+      io_control:
+        default: {hex: "00"}
+
+  dtcs:
+    - code: 0x010100
+      status: 0x09
+      severity: 0x80
+      snapshots:
+        - record: 0x01
+          dids:
+            - {id: 0xF40C, hex: "0B B8"}
+      extended_data:
+        - record: 0x01
+          hex: "05"
+    - code: 0x030000
+      status: 0x04
+    - code: 0xC10000
+      status: 0x08
+      permanent: true
+
+  routines:
+    - id: 0xFF00
+      access:
+        sessions: [0x03]
+      duration_ms: 1000
+      start:
+        response: {hex: "00"}
+        effects:
+          - erase_memory: {start: 0x010000, size: 0x10}
+      results:
+        running_response: {hex: "01"}
+        response: {hex: "00"}
+    - id: 0x0300
+      start:
+        effects:
+          - set_did: {id: 0x0101, ascii: "ACTIVE"}
+          - set_dtc: {code: 0x030000, status: 0x09}
+      stop: {}
+    - id: 0xFF01
+      start:
+        option_length: 4
+        response: {hex: "00"}
+        cases:
+          - request: {hex: "DE AD BE EF"}
+            response: {hex: "01"}
+
+  memory:
+    file: firmware.s19
+    output_file: firmware.out.s19
+    regions:
+      - name: code
+        start: 0x010000
+        size: 0x100
+        write: {}
+      - name: calibration
+        start: 0x020000
+        size: 0x100
+        write:
+          sessions: [0x03]
+          security_levels: [0x01]
