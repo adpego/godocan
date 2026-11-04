@@ -31,8 +31,13 @@ type Socket struct {
 	closed atomic.Bool
 }
 
-// readTimeout bounds blocking reads so that Close can stop a reader.
-const readTimeout = 200 * time.Millisecond
+const (
+	// readTimeout bounds blocking reads so that Close can stop a reader.
+	readTimeout = 200 * time.Millisecond
+	// writeTimeout is how long a frame may wait for room in the transmit
+	// queue of a busy bus (N_As of ISO 15765-2).
+	writeTimeout = time.Second
+)
 
 // Filter accepts frames whose identifier matches ID (exactly, with the
 // given identifier format).
@@ -122,7 +127,8 @@ func (s *Socket) Read() (Frame, error) {
 	}
 }
 
-// Write sends a frame, retrying while the transmit queue is full.
+// Write sends a frame, retrying while the transmit queue is full (up to
+// writeTimeout).
 func (s *Socket) Write(f Frame) error {
 	if !ValidDataLength(len(f.Data), f.FD) {
 		return fmt.Errorf("invalid data length %d for %v", len(f.Data), f)
@@ -144,13 +150,14 @@ func (s *Socket) Write(f Frame) error {
 		buf[5] = canFDFlagBRS
 	}
 	copy(buf[8:], f.Data)
-	for attempt := 0; ; attempt++ {
+	deadline := time.Now().Add(writeTimeout)
+	for {
 		_, err := unix.Write(s.fd, buf)
 		switch {
 		case err == nil:
 			return nil
-		case errors.Is(err, unix.ENOBUFS) && attempt < 1000:
-			time.Sleep(100 * time.Microsecond) // transmit queue full
+		case errors.Is(err, unix.ENOBUFS) && time.Now().Before(deadline):
+			time.Sleep(100 * time.Microsecond) // transmit queue full: wait for the bus
 		case errors.Is(err, unix.EINTR):
 		default:
 			return err
