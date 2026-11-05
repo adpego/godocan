@@ -111,7 +111,7 @@ and [`udsoncan`](https://github.com/pylessard/python-udsoncan) (`tests/e2e`).
 | SocketCAN raw socket, kernel filters on the request IDs          | ✅ | ✅ | ✅ | Classic and FD frames |
 | 11-bit and 29-bit identifiers                                    | ✅ | ✅ | ✅ | Defaults 0x7E0/0x7E8/0x7DF, 29-bit functional 0x18DB33F1 |
 | Single frames, first/consecutive frames, flow control            | ✅ | ✅ | ✅ | |
-| Messages above 4095 bytes (escape first frame)                   | ✅ | ✅ |    | Limited by `max_message_size` |
+| Messages above 4095 bytes (escape first frame)                   | ✅ | ✅ | ✅ | Limited by `max_message_size` |
 | Our flow control: block size, STmin                              | ✅ | ✅ | ✅ | |
 | Tester flow control: BS, STmin (ms and 100-900 µs), WAIT, OVFLW  | ✅ | ✅ | ✅ | `wft_max` WAIT frames in a row |
 | Timeouts N_Bs (flow control) and N_Cr (consecutive frame)        | ✅ | ✅ | ✅ | |

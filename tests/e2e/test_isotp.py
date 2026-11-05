@@ -259,3 +259,18 @@ def test_periodic_data_as_uudt(start_server, bus):
     with pytest.raises(TimeoutError):
         s.recv()  # periodic data must not use ISO-TP
     s.close()
+
+
+def test_messages_above_4095_bytes(start_server, bus):
+    start_server({"padding: 0xCC\n": "padding: 0xCC\n  fd: true\n  max_message_size: 8000\n"})
+    s = isotp_socket(timeout=3)
+    s.set_ll_opts(mtu=isotp.socket.LinkLayerProtocol.CAN_FD, tx_dl=64)
+    s.bind(INTERFACE, address=isotp.Address(isotp.AddressingMode.Normal_11bits, rxid=RESP, txid=REQ))
+    value = bytes(i & 0xFF for i in range(6000))
+    s.send(bytes([0x2E, 0x01, 0x01]) + value)
+    assert s.recv() == bytes([0x6E, 0x01, 0x01])
+    s.send(bytes([0x22, 0x01, 0x01]))
+    assert s.recv(8300) == bytes([0x62, 0x01, 0x01]) + value  # can-isotp reads 4095 bytes by default
+    s.close()
+    escaped = [f for f in bus.frames(RESP, 0.2) if f["data"][:2] == b"\x10\x00"]
+    assert escaped and escaped[0]["data"][2:6] == (6003).to_bytes(4, "big"), "escaped first frame from the ECU"
